@@ -117,8 +117,8 @@ def main():
 
     # custom arguments
     parser.add_argument("-n", "--num-agents", type=int, default=8)
-    parser.add_argument("--algo", type=str, default="gcbf+")
-    parser.add_argument("--env", type=str, default="SimpleCar")
+    parser.add_argument("--algo", type=str, default="r_gcbf+")
+    parser.add_argument("--env", type=str, default="DoubleIntegrator")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--name", type=str, default=None)

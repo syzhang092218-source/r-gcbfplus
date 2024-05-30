@@ -3,6 +3,7 @@ from .dec_share_cbf import DecShareCBF
 from .gcbf import GCBF
 from .gcbf_plus import GCBFPlus
 from .centralized_cbf import CentralizedCBF
+from .r_gcbf_plus import RGCBFPlus
 
 
 def make_algo(algo: str, **kwargs) -> MultiAgentController:
@@ -10,6 +11,8 @@ def make_algo(algo: str, **kwargs) -> MultiAgentController:
         return GCBF(**kwargs)
     elif algo == 'gcbf+':
         return GCBFPlus(**kwargs)
+    elif algo == 'r_gcbf+':
+        return RGCBFPlus(**kwargs)
     elif algo == 'centralized_cbf':
         return CentralizedCBF(**kwargs)
     elif algo == 'dec_share_cbf':

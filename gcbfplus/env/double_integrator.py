@@ -7,6 +7,7 @@ import numpy as np
 
 from typing import NamedTuple, Tuple, Optional
 
+from .noise import Noise
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
 from ..utils.typing import Action, AgentState, Array, Cost, Done, Info, Reward, State
 from ..utils.utils import merge01, jax_vmap
@@ -48,6 +49,7 @@ class DoubleIntegrator(MultiAgentEnv):
             max_step: int = 256,
             max_travel: float = None,
             dt: float = 0.03,
+            add_noise: bool = False,
             params: dict = None
     ):
         super(DoubleIntegrator, self).__init__(num_agents, area_size, max_step, max_travel, dt, params)
@@ -56,13 +58,22 @@ class DoubleIntegrator(MultiAgentEnv):
         A[1, 3] = 1.0
         self._A = A * self._dt + np.eye(self.state_dim)
         self._B = (
-            np.array([[0.0, 0.0], [0.0, 0.0], [1.0 / self._params["m"], 0.0], [0.0, 1.0 / self._params["m"]]])
-            * self._dt
+                np.array([[0.0, 0.0], [0.0, 0.0], [1.0 / self._params["m"], 0.0], [0.0, 1.0 / self._params["m"]]])
+                * self._dt
         )
         self._Q = np.eye(self.state_dim) * 5
         self._R = np.eye(self.action_dim)
         self._K = jnp.array(lqr(self._A, self._B, self._Q, self._R))
         self.create_obstacles = jax_vmap(Rectangle.create)
+
+        self.add_noise = add_noise
+        # self.noise = Noise(
+        #     n_agent=num_agents,
+        #     n_dim=4,
+        #     stds=jnp.array([0.05, 0.05, 0.1, 0.1]),
+        #     bounds=jnp.array([0.1, 0.1, 0.1, 0.1])
+        # )
+        self.noise_bounds = jnp.array([0., 0., 0.1, 0.1])
 
     @property
     def state_dim(self) -> int:
@@ -109,7 +120,14 @@ class DoubleIntegrator(MultiAgentEnv):
 
         env_states = self.EnvState(states, goals, obstacles)
 
-        return self.get_graph(env_states)
+        graph = self.get_graph(env_states)
+
+        # if self.add_noise:
+        #     noise_key, key = jr.split(key, 2)
+        #     noisy_graph = self.noise.sample(None, graph, noise_key)
+        #     return noisy_graph
+        # else:
+        return graph
 
     def agent_accel(self, action: Action) -> Action:
         return action / self._params["m"]
@@ -119,7 +137,7 @@ class DoubleIntegrator(MultiAgentEnv):
         # [x, y, vx, vy]
         assert agent_states.shape == (self.num_agents, self.state_dim)
         n_accel = self.agent_accel(action)
-        n_pos_new = agent_states[:, :2] + agent_states[:, 2:] * self.dt + n_accel * self.dt**2 / 2
+        n_pos_new = agent_states[:, :2] + agent_states[:, 2:] * self.dt + n_accel * self.dt ** 2 / 2
         n_vel_new = agent_states[:, 2:] + n_accel * self.dt
         n_state_agent_new = jnp.concatenate([n_pos_new, n_vel_new], axis=1)
         assert n_state_agent_new.shape == (self.num_agents, self.state_dim)
@@ -143,7 +161,7 @@ class DoubleIntegrator(MultiAgentEnv):
         return x_dot
 
     def step(
-        self, graph: EnvGraphsTuple, action: Action, get_eval_info: bool = False
+            self, graph: EnvGraphsTuple, action: Action, get_eval_info: bool = False
     ) -> Tuple[EnvGraphsTuple, Reward, Cost, Done, Info]:
         self._t += 1
 
@@ -178,7 +196,10 @@ class DoubleIntegrator(MultiAgentEnv):
             agent_pos = agent_states[:, :2]
             info["inside_obstacles"] = inside_obstacles(agent_pos, obstacles, r=self._params["car_radius"])
 
-        return self.get_graph(next_state), reward, cost, done, info
+        graph = self.get_graph(next_state)
+        # if self.add_noise:
+        #     graph = self.noise.sample(None, graph, key=jr.PRNGKey(np.random.randint(0, 102400)))
+        return graph, reward, cost, done, info
 
     def get_cost(self, graph: EnvGraphsTuple) -> Cost:
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
@@ -337,17 +358,24 @@ class DoubleIntegrator(MultiAgentEnv):
         error = jnp.clip(error, -error_max, error_max)
         return self.clip_action(error @ self._K.T)
 
-    def forward_graph(self, graph: GraphsTuple, action: Action) -> GraphsTuple:
+    def forward_graph(self, graph: GraphsTuple, action: Action, noise_model=None) -> GraphsTuple:
         # calculate next graph
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
         goal_states = graph.type_states(type_idx=1, n_type=self.num_agents)
         obs_states = graph.type_states(type_idx=2, n_type=self._params["n_rays"] * self.num_agents)
         action = self.clip_action(action)
 
+        # cur_states = jnp.concatenate([agent_states, goal_states, obs_states], axis=0)
+        # new_graph = self.add_edge_feats(graph, cur_states)
+        # edge_noise = no_noise_graph.edges - graph.edges
+
         assert action.shape == (self.num_agents, self.action_dim)
         assert agent_states.shape == (self.num_agents, self.state_dim)
 
         next_agent_states = self.agent_step_euler(agent_states, action)
+        if noise_model is not None:
+            next_agent_states_noise = noise_model(graph)
+            next_agent_states += next_agent_states_noise
         next_states = jnp.concatenate([next_agent_states, goal_states, obs_states], axis=0)
 
         next_graph = self.add_edge_feats(graph, next_states)
@@ -404,9 +432,9 @@ class DoubleIntegrator(MultiAgentEnv):
         heading_vec = heading_vec0.repeat(pos_vec.shape[1], axis=1)
         inner_prod = jnp.sum(pos_vec * heading_vec, axis=2)
         unsafe_theta_agent = jnp.arctan2(self._params['car_radius'] * 2,
-                                         jnp.sqrt(agent_dist**2 - 4 * self._params['car_radius']**2))
+                                         jnp.sqrt(agent_dist ** 2 - 4 * self._params['car_radius'] ** 2))
         unsafe_theta_obs = jnp.arctan2(self._params['car_radius'],
-                                       jnp.sqrt(obs_dist**2 - self._params['car_radius']**2))
+                                       jnp.sqrt(obs_dist ** 2 - self._params['car_radius'] ** 2))
         unsafe_theta = jnp.concatenate([unsafe_theta_agent, unsafe_theta_obs], axis=1)
         lidar_mask = jnp.ones((self._params["n_rays"],))
         lidar_mask = jax.scipy.linalg.block_diag(*[lidar_mask] * self.num_agents)

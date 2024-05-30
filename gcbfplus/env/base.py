@@ -54,6 +54,7 @@ class MultiAgentEnv(ABC):
         self._max_step = max_step
         self._max_travel = max_travel
         self._area_size = area_size
+        self.noise_bounds = jnp.zeros_like(self.state_dim)
 
     @property
     def params(self) -> dict:
