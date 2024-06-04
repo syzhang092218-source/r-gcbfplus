@@ -50,7 +50,8 @@ class DoubleIntegrator(MultiAgentEnv):
             max_travel: float = None,
             dt: float = 0.03,
             add_noise: bool = False,
-            params: dict = None
+            params: dict = None,
+            noise_model=None
     ):
         super(DoubleIntegrator, self).__init__(num_agents, area_size, max_step, max_travel, dt, params)
         A = np.zeros((self.state_dim, self.state_dim), dtype=np.float32)
@@ -73,7 +74,11 @@ class DoubleIntegrator(MultiAgentEnv):
         #     stds=jnp.array([0.05, 0.05, 0.1, 0.1]),
         #     bounds=jnp.array([0.1, 0.1, 0.1, 0.1])
         # )
-        self.noise_bounds = jnp.array([0., 0., 0.1, 0.1])
+        self.noise_bounds = jnp.array([0., 0., 3., 3.])
+        self.noise_model = noise_model
+
+    def set_noise_model(self, noise_model):
+        self.noise_model = noise_model
 
     @property
     def state_dim(self) -> int:
@@ -175,6 +180,11 @@ class DoubleIntegrator(MultiAgentEnv):
         assert agent_states.shape == (self.num_agents, self.state_dim)
 
         next_agent_states = self.agent_step_euler(agent_states, action)
+
+        # add noise
+        if self.noise_model is not None:
+            noise = self.noise_model(graph)
+            next_agent_states += noise * self.dt
 
         # the episode ends when reaching max_episode_steps
         done = jnp.array(False)
@@ -375,7 +385,7 @@ class DoubleIntegrator(MultiAgentEnv):
         next_agent_states = self.agent_step_euler(agent_states, action)
         if noise_model is not None:
             next_agent_states_noise = noise_model(graph)
-            next_agent_states += next_agent_states_noise
+            next_agent_states += next_agent_states_noise * self.dt
         next_states = jnp.concatenate([next_agent_states, goal_states, obs_states], axis=0)
 
         next_graph = self.add_edge_feats(graph, next_states)

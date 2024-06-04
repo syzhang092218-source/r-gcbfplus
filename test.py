@@ -114,6 +114,39 @@ def test(args):
         act_fn = jax.jit(env.u_ref)
         step = 0
 
+    if hasattr(algo, "noise"):
+        noise_model = ft.partial(algo.noise.get, algo.noise_train_state.params, n_agents=num_agents)
+        env.set_noise_model(noise_model)
+
+    if args.noise_path is not None:
+        noise_model = make_algo(
+            algo="r_gcbf+",
+            env=env,
+            node_dim=env.node_dim,
+            edge_dim=env.edge_dim,
+            state_dim=env.state_dim,
+            action_dim=env.action_dim,
+            n_agents=env.num_agents,
+            gnn_layers=config.gnn_layers,
+            batch_size=config.batch_size,
+            buffer_size=config.buffer_size,
+            horizon=config.horizon,
+            lr_actor=config.lr_actor,
+            lr_cbf=config.lr_cbf,
+            alpha=config.alpha,
+            eps=0.02,
+            inner_epoch=8,
+            loss_action_coef=config.loss_action_coef,
+            loss_unsafe_coef=config.loss_unsafe_coef,
+            loss_safe_coef=config.loss_safe_coef,
+            loss_h_dot_coef=config.loss_h_dot_coef,
+            max_grad_norm=2.0,
+            seed=config.seed
+        )
+        noise_model.load(os.path.join(args.noise_path, "models"), step)
+        noise_model = ft.partial(noise_model.noise.get, noise_model.noise_train_state.params, n_agents=num_agents)
+        env.set_noise_model(noise_model)
+
     test_key = jr.PRNGKey(args.seed)
     test_keys = jr.split(test_key, 1_000)[: args.epi]
     test_keys = test_keys[args.offset:]
@@ -154,6 +187,7 @@ def test(args):
     is_finishes = []
     rates = []
     cbfs = []
+    noises = []
     for i_epi in range(args.epi):
         key_x0, _ = jr.split(test_keys[i_epi], 2)
 
@@ -179,6 +213,8 @@ def test(args):
             cbfs.append(get_bb_cbf_fn(rollout.Tp1_graph))
         else:
             cbfs.append(None)
+        if args.noise is not None:
+            noises.append(jax.vmap(env.noise_model)(rollout.Tp1_graph)[:, :, 2:])
         if len(is_unsafes) == 0:
             continue
         safe_rate = 1 - is_unsafes[-1].max(axis=0).mean()
@@ -231,6 +267,9 @@ def test(args):
         if args.cbf is not None:
             video_name += f"_cbf{args.cbf}"
             viz_opts["cbf"] = [*cbf, args.cbf]
+        if args.noise is not None:
+            video_name += f"_noise"
+            viz_opts["noise"] = noises[ii]
 
         video_path = videos_dir / f"{stamp_str}_{video_name}.mp4"
         env.render_video(rollout, video_path, Ta_is_unsafe, viz_opts, dpi=args.dpi)
@@ -247,6 +286,8 @@ def main():
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--max-travel", type=float, default=None)
     parser.add_argument("--cbf", type=int, default=None)
+    parser.add_argument("--noise", default=False, action="store_true")
+    parser.add_argument("--noise-path", type=str, default=None)
 
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--debug", action="store_true", default=False)

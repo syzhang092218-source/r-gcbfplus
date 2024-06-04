@@ -7,6 +7,8 @@ import functools as ft
 import jax.tree_util as jtu
 import numpy as np
 import einops as ei
+import os
+import pickle
 
 from typing import Optional, Tuple, NamedTuple
 from flax.training.train_state import TrainState
@@ -42,7 +44,7 @@ class RGCBFPlus(GCBFPlus):
             horizon: int = 32,
             lr_actor: float = 3e-5,
             lr_cbf: float = 3e-5,
-            lr_noise: float = 3e-5,
+            lr_noise: float = 1e-5,
             alpha: float = 1.0,
             eps: float = 0.02,
             inner_epoch: int = 8,
@@ -123,7 +125,7 @@ class RGCBFPlus(GCBFPlus):
             safe_mask_batch = merge01(minibatch.safe_mask)
             unsafe_mask_batch = merge01(minibatch.unsafe_mask)
 
-            def get_loss(cbf_params: Params, actor_params: Params, noise_params: Params) -> Tuple[Array, dict]:
+            def get_loss(cbf_params: Params, actor_params: Params) -> Tuple[Array, dict]:
                 # get CBF values
                 cbf_fn = jax_vmap(ft.partial(self.cbf.get_cbf, cbf_params))
                 cbf_fn_no_grad = jax_vmap(ft.partial(self.cbf.get_cbf, jax.lax.stop_gradient(cbf_params)))
@@ -155,7 +157,7 @@ class RGCBFPlus(GCBFPlus):
                 # get next graph
                 forward_fn = ft.partial(self._env.forward_graph,
                                         noise_model=ft.partial(self.noise_train_state.apply_fn,
-                                                               noise_params, n_agents=self.n_agents))
+                                                               noise.params, n_agents=self.n_agents))
                 forward_fn = jax.vmap(forward_fn)
                 next_graph = forward_fn(minibatch.graph, action)
                 h_next = merge01(cbf_fn(next_graph).squeeze())
@@ -196,18 +198,50 @@ class RGCBFPlus(GCBFPlus):
                                     'acc/h_dot': acc_h_dot,
                                     'acc/unsafe_data_ratio': unsafe_data_ratio}
 
-            (loss, loss_info), (grad_cbf, grad_actor, grad_noise) = jax.value_and_grad(
-                get_loss, has_aux=True, argnums=(0, 1, 2))(cbf.params, actor.params, noise.params)
+            def get_noise_loss(noise_params: Params) -> [Array, dict]:
+                # get CBF values
+                cbf_fn = jax_vmap(ft.partial(self.cbf.get_cbf, cbf.params))
+                # (minibatch_size, n_agents)
+                h = cbf_fn(minibatch.graph).squeeze()
+                # (minibatch_size * n_agents,)
+                h = merge01(h)
+
+                # get neural network actions
+                action_fn = jax.vmap(ft.partial(self.act, params=actor.params))
+                action = action_fn(minibatch.graph)
+
+                # get next graph
+                forward_fn = ft.partial(self._env.forward_graph,
+                                        noise_model=ft.partial(self.noise_train_state.apply_fn,
+                                                               noise_params, n_agents=self.n_agents))
+                forward_fn = jax.vmap(forward_fn)
+                next_graph = forward_fn(minibatch.graph, action)
+                h_next = merge01(cbf_fn(next_graph).squeeze())
+                h_dot = (h_next - h) / self._env.dt
+                loss_noise = -jax.nn.relu(-h_dot - self.alpha * h + self.eps * 10)
+
+                noise_fn = ft.partial(self.noise_train_state.apply_fn,
+                                                               noise_params, n_agents=self.n_agents)
+                noise_val = jax.vmap(noise_fn)(minibatch.graph)
+                # noise_val = self.noise_train_state.apply_fn(noise_params, minibatch.graph, self.n_agents)
+                loss_noise += jnp.mean(jnp.square(noise_val)) * 0.01
+
+                return jnp.mean(loss_noise), {'loss/noise': jnp.mean(loss_noise)}
+
+            (loss, loss_info), (grad_cbf, grad_actor) = jax.value_and_grad(
+                get_loss, has_aux=True, argnums=(0, 1))(cbf.params, actor.params)
+            (loss_noise, loss_noise_info), grad_noise = jax.value_and_grad(
+                get_noise_loss, has_aux=True)(noise.params)
             grad_cbf, grad_cbf_norm = compute_norm_and_clip(grad_cbf, self.max_grad_norm)
             grad_actor, grad_actor_norm = compute_norm_and_clip(grad_actor, self.max_grad_norm)
             grad_noise, grad_noise_norm = compute_norm_and_clip(grad_noise, self.max_grad_norm)
             cbf = cbf.apply_gradients(grads=grad_cbf)
             actor = actor.apply_gradients(grads=grad_actor)
-            noise = noise.apply_gradients(grads=jtu.tree_map(lambda x: -x, grad_noise))  # gradient ascent
+            noise = noise.apply_gradients(grads=grad_noise)
             grad_info = {'grad_norm/cbf': grad_cbf_norm,
                          'grad_norm/actor': grad_actor_norm,
                          'grad_norm/noise': grad_noise_norm}
-            return (cbf, actor, noise), grad_info | loss_info
+            return (cbf, actor, noise), grad_info | loss_info | loss_noise_info
 
         train_state = (cbf_train_state, actor_train_state, noise_train_state)
         (cbf_train_state, actor_train_state, noise_train_state), info = lax.scan(update_fn, train_state, batch)
@@ -215,3 +249,21 @@ class RGCBFPlus(GCBFPlus):
         # get training info of the last PPO epoch
         info = jtu.tree_map(lambda x: x[-1], info)
         return cbf_train_state, actor_train_state, noise_train_state, info
+
+    def save(self, save_dir: str, step: int):
+        model_dir = os.path.join(save_dir, str(step))
+        if not os.path.exists(model_dir):
+            os.makedirs(model_dir)
+        pickle.dump(self.actor_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
+        pickle.dump(self.cbf_train_state.params, open(os.path.join(model_dir, 'cbf.pkl'), 'wb'))
+        pickle.dump(self.noise_train_state.params, open(os.path.join(model_dir, 'noise.pkl'), 'wb'))
+
+    def load(self, load_dir: str, step: int):
+        path = os.path.join(load_dir, str(step))
+
+        self.actor_train_state = \
+            self.actor_train_state.replace(params=pickle.load(open(os.path.join(path, 'actor.pkl'), 'rb')))
+        self.cbf_train_state = \
+            self.cbf_train_state.replace(params=pickle.load(open(os.path.join(path, 'cbf.pkl'), 'rb')))
+        self.noise_train_state = \
+            self.noise_train_state.replace(params=pickle.load(open(os.path.join(path, 'noise.pkl'), 'rb')))

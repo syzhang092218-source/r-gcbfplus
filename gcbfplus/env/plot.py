@@ -335,10 +335,18 @@ def render_video(
             cnt_col = [*cnt.collections, *cnt_line.collections]
 
             ax.text(0.5, 1.0, "CBF for {}".format(cbf_num), transform=ax.transAxes, va="bottom")
+    noise_arrows = []
+    if "noise" in viz_opts:
+        noise = viz_opts["noise"]  # (T, a, dim)
+        noise0 = noise[0]
+        for ii in range(n_agent):
+            noise_arrows.append(
+                ax.arrow(n_pos[ii, 0], n_pos[ii, 1], noise0[ii, 0] * 1, noise0[ii, 1] * 1,
+                         head_width=0.01, head_length=0.01))
 
     # init function for animation
     def init_fn() -> list[plt.Artist]:
-        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text]
+        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text, *noise_arrows]
 
     # update function for animation
     def update(kk: int) -> list[plt.Artist]:
@@ -401,9 +409,20 @@ def render_video(
         else:
             cnt_col_t = []
 
+        nonlocal noise_arrows
+        if "noise" in viz_opts:
+            for a in noise_arrows:
+                a.remove()
+            noise_kk = viz_opts["noise"][kk]  # (T, a, dim)
+            noise_arrows = []
+            for ii in range(n_agent):
+                noise_arrows.append(
+                    ax.arrow(n_pos_t[ii, 0], n_pos_t[ii, 1], noise_kk[ii, 0] * 1, noise_kk[ii, 1] * 1,
+                             head_width=0.1, head_length=0.1))
+
         kk_text.set_text("kk={:04}".format(kk))
 
-        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text]
+        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text, *noise_arrows]
 
     fps = 30.0
     spf = 1 / fps
