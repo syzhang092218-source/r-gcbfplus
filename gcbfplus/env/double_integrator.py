@@ -74,7 +74,8 @@ class DoubleIntegrator(MultiAgentEnv):
         #     stds=jnp.array([0.05, 0.05, 0.1, 0.1]),
         #     bounds=jnp.array([0.1, 0.1, 0.1, 0.1])
         # )
-        self.noise_bounds = jnp.array([0., 0., 3., 3.])
+        self.noise_bounds = jnp.array([0., 0., 9., 9.])
+        # self.noise_bounds = jnp.array([0.001, 0.001, 0., 0.])
         self.noise_model = noise_model
 
     def set_noise_model(self, noise_model):
