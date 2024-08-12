@@ -3,6 +3,7 @@ import functools as ft
 import numpy as np
 import jax.nn as jnn
 import jax.numpy as jnp
+import jax
 
 from typing import Type, Tuple
 from abc import ABC, abstractproperty, abstractmethod
@@ -66,11 +67,30 @@ class Deterministic(nn.Module):
     _nu: int
 
     @nn.compact
-    def __call__(self, obs: GraphsTuple, n_agents: int, *args, **kwargs) -> Action:
+    def __call__(self, obs: GraphsTuple, n_agents: int, u_ref: Action = None, *args, **kwargs) -> Action:
         x = self.base_cls()(obs, node_type=0, n_type=n_agents)
+        if u_ref is not None:
+            u_ref_encode = nn.tanh(nn.Dense(128, kernel_init=default_nn_init(), name="RefDense")(u_ref))
+            x = jnp.concatenate([x, u_ref_encode], axis=-1)
         x = self.head_cls()(x)
         x = nn.tanh(nn.Dense(self._nu, kernel_init=default_nn_init(), name="OutputDense")(x))
         return x
+
+
+# class DeterministicWithRef(nn.Module):
+#     base_cls: Type[GNN]
+#     head_cls: Type[nn.Module]
+#     action_encoder_cls: Type[nn.Module]
+#     _nu: int
+#
+#     @nn.compact
+#     def __call__(self, obs: GraphsTuple, n_agents: int, u_ref: Action, *args, **kwargs) -> Action:
+#         x = self.base_cls()(obs, node_type=0, n_type=n_agents)
+#         y = self.action_encoder_cls()(u_ref)
+#         x = jnp.concatenate([x, y], axis=-1)
+#         x = self.head_cls()(x)
+#         x = nn.tanh(nn.Dense(self._nu, kernel_init=default_nn_init(), name="OutputDense")(x))
+#         return x
 
 
 class MultiAgentPolicy(ABC):
@@ -82,15 +102,17 @@ class MultiAgentPolicy(ABC):
         self.action_dim = action_dim
 
     @abstractmethod
-    def get_action(self, params: Params, obs: GraphsTuple) -> Action:
+    def get_action(self, params: Params, obs: GraphsTuple, u_ref: Action = None) -> Action:
         pass
 
     @abstractmethod
-    def sample_action(self, params: Params, obs: GraphsTuple, key: PRNGKey) -> Tuple[Action, Array]:
+    def sample_action(self, params: Params, obs: GraphsTuple, key: PRNGKey, u_ref: Action = None) -> Tuple[Action, Array]:
         pass
 
     @abstractmethod
-    def eval_action(self, params: Params, obs: GraphsTuple, action: Action, key: PRNGKey) -> Tuple[Array, Array]:
+    def eval_action(
+            self, params: Params, obs: GraphsTuple, action: Action, key: PRNGKey, u_ref: Action = None
+    ) -> Tuple[Array, Array]:
         pass
 
 
@@ -103,6 +125,7 @@ class DeterministicPolicy(MultiAgentPolicy):
             n_agents: int,
             action_dim: int,
             gnn_layers: int = 1,
+            ref_input: bool = False
     ):
         super().__init__(node_dim, edge_dim, n_agents, action_dim)
         self.policy_base = ft.partial(
@@ -121,18 +144,26 @@ class DeterministicPolicy(MultiAgentPolicy):
             act_final=False,
             name='PolicyHead'
         )
+        self.ref_input = ref_input
+        # if self.ref_input:
+        #     self.net = DeterministicWithRef(
+        #         base_cls=self.policy_base,
+        #         head_cls=self.policy_head,
+        #         _nu=action_dim
+        #     )
+        # else:
         self.net = Deterministic(base_cls=self.policy_base, head_cls=self.policy_head, _nu=action_dim)
-        self.std = 0.1
+        # self.std = 0.1
 
-    def get_action(self, params: Params, obs: GraphsTuple) -> Action:
-        return self.net.apply(params, obs, self.n_agents)
+    def get_action(self, params: Params, obs: GraphsTuple, u_ref: Action = None) -> Action:
+        return self.net.apply(params, obs, self.n_agents, u_ref)
 
-    def sample_action(self, params: Params, obs: GraphsTuple, key: PRNGKey) -> Tuple[Action, Array]:
-        action = self.get_action(params, obs)
+    def sample_action(self, params: Params, obs: GraphsTuple, key: PRNGKey, u_ref: Action = None) -> Tuple[Action, Array]:
+        action = self.get_action(params, obs, u_ref)
         log_pi = jnp.zeros_like(action)
         return action, log_pi
 
-    def eval_action(self, params: Params, obs: GraphsTuple, action: Action, key: PRNGKey) -> Tuple[Array, Array]:
+    def eval_action(self, params: Params, obs: GraphsTuple, action: Action, key: PRNGKey, u_ref: Action = None) -> Tuple[Array, Array]:
         raise NotImplementedError
 
 
@@ -158,19 +189,23 @@ class PPOPolicy(MultiAgentPolicy):
         )
         self.dist = TanhNormal(base_cls=self.dist_base, _nu=action_dim)
 
-    def get_action(self, params: Params, obs: GraphsTuple) -> Action:
-        dist = self.dist.apply(params, obs, n_agents=self.n_agents)
+    def get_action(self, params: Params, obs: GraphsTuple, u_ref: Action = None) -> Action:
+        dist = self.dist.apply(params, obs, n_agents=self.n_agents, u_ref=u_ref)
         action = dist.mode()
         return action
 
-    def sample_action(self, params: Params, obs: GraphsTuple, key: PRNGKey) -> Tuple[Action, Array]:
-        dist = self.dist.apply(params, obs, n_agents=self.n_agents)
+    def sample_action(
+            self, params: Params, obs: GraphsTuple, key: PRNGKey, u_ref: Action = None
+    ) -> Tuple[Action, Array]:
+        dist = self.dist.apply(params, obs, n_agents=self.n_agents, u_ref=u_ref)
         action = dist.sample(seed=key)
         log_pi = dist.log_prob(action)
         return action, log_pi
 
-    def eval_action(self, params: Params, obs: GraphsTuple, action: Action, key: PRNGKey) -> Tuple[Array, Array]:
-        dist = self.dist.apply(params, obs, n_agents=self.n_agents)
+    def eval_action(
+            self, params: Params, obs: GraphsTuple, action: Action, key: PRNGKey, u_ref: Action = None
+    ) -> Tuple[Array, Array]:
+        dist = self.dist.apply(params, obs, n_agents=self.n_agents, u_ref=u_ref)
         log_pi = dist.log_prob(action)
         entropy = dist.entropy(seed=key)
         return log_pi, entropy

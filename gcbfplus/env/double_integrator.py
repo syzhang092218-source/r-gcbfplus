@@ -234,17 +234,17 @@ class DoubleIntegrator(MultiAgentEnv):
         agent_agent_edges = EdgeBlock(state_diff, agent_agent_mask, id_agent, id_agent)
 
         # agent - goal connection, clipped to avoid too long edges
-        id_goal = jnp.arange(self.num_agents, self.num_agents * 2)
-        agent_goal_mask = jnp.eye(self.num_agents)
-        agent_goal_feats = state.agent[:, None, :] - state.goal[None, :, :]
-        feats_norm = jnp.sqrt(1e-6 + jnp.sum(agent_goal_feats[:, :2] ** 2, axis=-1, keepdims=True))
-        comm_radius = self._params["comm_radius"]
-        safe_feats_norm = jnp.maximum(feats_norm, comm_radius)
-        coef = jnp.where(feats_norm > comm_radius, comm_radius / safe_feats_norm, 1.0)
-        agent_goal_feats = agent_goal_feats.at[:, :2].set(agent_goal_feats[:, :2] * coef)
-        agent_goal_edges = EdgeBlock(
-            agent_goal_feats, agent_goal_mask, id_agent, id_goal
-        )
+        # id_goal = jnp.arange(self.num_agents, self.num_agents * 2)
+        # agent_goal_mask = jnp.eye(self.num_agents)
+        # agent_goal_feats = state.agent[:, None, :] - state.goal[None, :, :]
+        # feats_norm = jnp.sqrt(1e-6 + jnp.sum(agent_goal_feats[:, :2] ** 2, axis=-1, keepdims=True))
+        # comm_radius = self._params["comm_radius"]
+        # safe_feats_norm = jnp.maximum(feats_norm, comm_radius)
+        # coef = jnp.where(feats_norm > comm_radius, comm_radius / safe_feats_norm, 1.0)
+        # agent_goal_feats = agent_goal_feats.at[:, :2].set(agent_goal_feats[:, :2] * coef)
+        # agent_goal_edges = EdgeBlock(
+        #     agent_goal_feats, agent_goal_mask, id_agent, id_goal
+        # )
 
         # agent - obs connection
         id_obs = jnp.arange(self.num_agents * 2, self.num_agents * 2 + n_hits)
@@ -261,7 +261,7 @@ class DoubleIntegrator(MultiAgentEnv):
                 EdgeBlock(lidar_feats[None, :, :], agent_obs_mask, id_agent[i][None], id_obs[id_hits])
             )
 
-        return [agent_agent_edges, agent_goal_edges] + agent_obs_edges
+        return [agent_agent_edges] + agent_obs_edges
 
     def control_affine_dyn(self, state: State) -> [Array, Array]:
         assert state.ndim == 2
