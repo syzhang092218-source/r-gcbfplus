@@ -227,7 +227,7 @@ class DoubleIntegrator(MultiAgentEnv):
         agent_pos = state.agent[:, :2]
         pos_diff = agent_pos[:, None, :] - agent_pos[None, :, :]  # [i, j]: i -> j
         dist = jnp.linalg.norm(pos_diff, axis=-1)
-        dist += jnp.eye(dist.shape[1]) * (self._params["comm_radius"] + 1)
+        # dist += jnp.eye(dist.shape[1]) * (self._params["comm_radius"] + 1)
         state_diff = state.agent[:, None, :] - state.agent[None, :, :]
         agent_agent_mask = jnp.less(dist, self._params["comm_radius"])
         id_agent = jnp.arange(self.num_agents)
